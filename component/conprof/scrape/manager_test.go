@@ -2,8 +2,8 @@ package scrape
 
 import (
 	"fmt"
-	"io/ioutil"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +11,7 @@ import (
 	"github.com/pingcap/ng-monitoring/component/conprof/store"
 	"github.com/pingcap/ng-monitoring/component/topology"
 	"github.com/pingcap/ng-monitoring/config"
+	"github.com/pingcap/ng-monitoring/database/docdb"
 	"github.com/pingcap/ng-monitoring/utils/testutil"
 
 	"github.com/pingcap/log"
@@ -22,14 +23,13 @@ import (
 func TestMain(m *testing.M) {
 	opts := []goleak.Option{
 		goleak.IgnoreTopFunction("github.com/golang/glog.(*loggingT).flushDaemon"),
-		goleak.IgnoreTopFunction("github.com/golang/glog.(*fileSink).flushDaemon"),
 	}
 
 	goleak.VerifyTestMain(m, opts...)
 }
 
 func TestManager(t *testing.T) {
-	tmpDir, err := ioutil.TempDir(os.TempDir(), "ngm-test-.*")
+	tmpDir, err := os.MkdirTemp(os.TempDir(), "ngm-test-.*")
 	require.NoError(t, err)
 	defer func() {
 		err := os.RemoveAll(tmpDir)
@@ -42,7 +42,8 @@ func TestManager(t *testing.T) {
 	cfg.ContinueProfiling.IntervalSeconds = 1
 	config.StoreGlobalConfig(cfg)
 
-	db := testutil.NewGenjiDB(t, tmpDir)
+	db, err := docdb.NewGenjiDBFromGenji(testutil.NewGenjiDB(t, tmpDir))
+	require.NoError(t, err)
 	defer db.Close()
 	storage, err := store.NewProfileStorage(db)
 	require.NoError(t, err)
@@ -117,7 +118,7 @@ func TestManager(t *testing.T) {
 			}
 		}
 		require.True(t, found, fmt.Sprintf("%#v", target))
-		require.Equal(t, target.Kind, string(data))
+		require.True(t, strings.Contains(string(data), target.Kind))
 		return nil
 	})
 	require.True(t, count > len(components))

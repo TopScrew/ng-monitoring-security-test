@@ -5,14 +5,15 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
 
+	"github.com/pingcap/ng-monitoring/component/conprof/jeprof"
 	"github.com/pingcap/ng-monitoring/component/conprof/meta"
 	"github.com/pingcap/ng-monitoring/component/conprof/store"
+	"github.com/pingcap/ng-monitoring/component/topology"
 	"github.com/pingcap/ng-monitoring/config"
 
 	"github.com/pingcap/log"
@@ -136,6 +137,16 @@ func (s *Scraper) scrape(ctx context.Context, w io.Writer) error {
 		return nil
 	}
 
+	if s.target.Component == topology.ComponentTiKV && s.target.Kind == meta.ProfileKindHeap {
+		// use jeprof to fetch tikv heap profile
+		data, err := jeprof.FetchRaw(s.target.GetURLString(), cfg.Security.GetHTTPClientConfig())
+		if err != nil {
+			return err
+		}
+		_, err = w.Write(data)
+		return err
+	}
+
 	if s.req == nil {
 		req, err := http.NewRequest("GET", s.target.GetURLString(), nil)
 		if err != nil {
@@ -160,7 +171,7 @@ func (s *Scraper) scrape(ctx context.Context, w io.Writer) error {
 		return fmt.Errorf("server returned HTTP status %s", resp.Status)
 	}
 
-	b, err := ioutil.ReadAll(resp.Body)
+	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return errors.Wrap(err, "failed to read body")
 	}

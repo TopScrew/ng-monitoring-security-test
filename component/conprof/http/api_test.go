@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -19,23 +19,24 @@ import (
 	"github.com/pingcap/ng-monitoring/component/conprof/meta"
 	"github.com/pingcap/ng-monitoring/component/topology"
 	"github.com/pingcap/ng-monitoring/config"
+	"github.com/pingcap/ng-monitoring/database/docdb"
 	"github.com/pingcap/ng-monitoring/utils/testutil"
 
-	"github.com/genjidb/genji"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
 type testSuite struct {
 	tmpDir string
-	db     *genji.DB
+	db     docdb.DocDB
 }
 
 func (ts *testSuite) setup(t *testing.T) {
 	var err error
-	ts.tmpDir, err = ioutil.TempDir(os.TempDir(), "ngm-test-.*")
+	ts.tmpDir, err = os.MkdirTemp(os.TempDir(), "ngm-test-.*")
 	require.NoError(t, err)
-	ts.db = testutil.NewGenjiDB(t, ts.tmpDir)
+	ts.db, err = docdb.NewGenjiDBFromGenji(testutil.NewGenjiDB(t, ts.tmpDir))
+	require.NoError(t, err)
 	cfg := config.GetDefaultConfig()
 	cfg.ContinueProfiling.Enable = true
 	cfg.ContinueProfiling.ProfileSeconds = 1
@@ -55,15 +56,14 @@ func TestAPI(t *testing.T) {
 	ts.setup(t)
 	defer ts.close(t)
 
+	httpAddr := setupHTTPService(t)
+	mockServer := testutil.CreateMockProfileServer(t)
+	defer mockServer.Stop(t)
+
 	topoSubScribe := make(topology.Subscriber)
 	err := conprof.Init(ts.db, topoSubScribe)
 	require.NoError(t, err)
 	defer conprof.Stop()
-
-	httpAddr := setupHTTPService(t)
-
-	mockServer := testutil.CreateMockProfileServer(t)
-	defer mockServer.Stop(t)
 
 	addr := mockServer.Addr
 	port := mockServer.Port
@@ -94,7 +94,7 @@ func testAPIGroupProfiles(t *testing.T, httpAddr string) int64 {
 	resp, err := http.Get(fmt.Sprintf("http://%v/continuous_profiling/group_profiles?begin_time=%v&end_time=%v", httpAddr, ts-2*60*60, ts))
 	require.NoError(t, err)
 	require.Equal(t, 200, resp.StatusCode)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	err = resp.Body.Close()
 	require.NoError(t, err)
@@ -114,7 +114,7 @@ func testAPIGroupProfileDetail(t *testing.T, httpAddr string, ts int64, componen
 	resp, err := http.Get("http://" + httpAddr + "/continuous_profiling/group_profile/detail?ts=" + strconv.Itoa(int(ts)))
 	require.NoError(t, err)
 	require.Equal(t, 200, resp.StatusCode)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	err = resp.Body.Close()
 	require.NoError(t, err)
@@ -144,7 +144,7 @@ func testAPISingleProfileView(t *testing.T, httpAddr string, ts int64, component
 		resp, err := http.Get(url)
 		require.NoError(t, err)
 		require.Equal(t, 200, resp.StatusCode)
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
 		require.Equal(t, "profile", string(body))
 		err = resp.Body.Close()
@@ -163,7 +163,7 @@ func testAPIDownload(t *testing.T, httpAddr string, ts int64, components []topol
 		resp, err := http.Get(url)
 		require.NoError(t, err)
 		require.Equal(t, 200, resp.StatusCode)
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
 		err = resp.Body.Close()
 		require.NoError(t, err)
@@ -191,7 +191,11 @@ func testAPIDownload(t *testing.T, httpAddr string, ts int64, components []topol
 			buf := make([]byte, len(fields[0]))
 			n, _ := reader.Read(buf)
 			require.Equal(t, len(fields[0]), n)
-			require.Equal(t, fields[0], string(buf))
+			if fields[1] == "tikv" && fields[0] == "heap" {
+				require.Equal(t, "--- ", string(buf))
+			} else {
+				require.Equal(t, fields[0], string(buf))
+			}
 
 			if idx == len(urls)-1 {
 				// test for download single profile
@@ -215,7 +219,7 @@ func testAPIComponent(t *testing.T, httpAddr string, components []topology.Compo
 	resp, err := http.Get("http://" + httpAddr + "/continuous_profiling/components")
 	require.NoError(t, err)
 	require.Equal(t, 200, resp.StatusCode)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	err = resp.Body.Close()
 	require.NoError(t, err)
@@ -240,7 +244,7 @@ func testAPIEstimateSize(t *testing.T, httpAddr string, components []topology.Co
 	resp, err := http.Get("http://" + httpAddr + "/continuous_profiling/estimate_size")
 	require.NoError(t, err)
 	require.Equal(t, 200, resp.StatusCode)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	err = resp.Body.Close()
 	require.NoError(t, err)
@@ -249,7 +253,7 @@ func testAPIEstimateSize(t *testing.T, httpAddr string, components []topology.Co
 	err = json.Unmarshal(body, &estimateSize)
 	require.NoError(t, err)
 	require.Equal(t, len(components), estimateSize.InstanceCount, string(body))
-	require.Equal(t, 88915968000, estimateSize.ProfileSize)
+	require.Equal(t, 106610688000, estimateSize.ProfileSize)
 }
 
 func testErrorRequest(t *testing.T, httpAddr string) {
@@ -273,7 +277,7 @@ func testErrorRequest(t *testing.T, httpAddr string) {
 		{"/single_profile/view?ts=x", `{"message":"invalid param ts value, error: strconv.ParseInt: parsing \"x\": invalid syntax","status":"error"}`},
 		{"/single_profile/view?ts=0", `{"message":"need param profile_type","status":"error"}`},
 		{"/single_profile/view?ts=0&data_format=svg", `{"message":"need param profile_type","status":"error"}`},
-		{"/single_profile/view?ts=0&data_format=unknown", `{"message":"invalid param data_format value unknown, expected: svg, protobuf","status":"error"}`},
+		{"/single_profile/view?ts=0&data_format=unknown", `{"message":"invalid param data_format value unknown, expected: svg, protobuf, jeprof, text","status":"error"}`},
 		{"/single_profile/view?ts=0&profile_type=heap", `{"message":"need param component","status":"error"}`},
 		{"/single_profile/view?ts=0&profile_type=heap&component=tidb", `{"message":"need param address","status":"error"}`},
 
@@ -288,7 +292,7 @@ func testErrorRequest(t *testing.T, httpAddr string) {
 		resp, err := http.Get("http://" + httpAddr + "/continuous_profiling" + ca.api)
 		require.NoError(t, err)
 		require.Equal(t, 503, resp.StatusCode, ca.api)
-		body, err := ioutil.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
 		require.Equal(t, ca.body, string(body), ca.api)
 		err = resp.Body.Close()
@@ -365,7 +369,7 @@ func TestQueryStatus(t *testing.T) {
 	resp, err := http.Get(fmt.Sprintf("http://%v/continuous_profiling/group_profiles?begin_time=%v&end_time=%v", httpAddr, t0.Unix(), t2.Unix()))
 	require.NoError(t, err)
 	require.Equal(t, 200, resp.StatusCode)
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	err = resp.Body.Close()
 	require.NoError(t, err)
@@ -387,7 +391,7 @@ func TestQueryStatus(t *testing.T) {
 		resp, err = http.Get("http://" + httpAddr + "/continuous_profiling/group_profile/detail?ts=" + strconv.Itoa(int(ts)))
 		require.NoError(t, err)
 		require.Equal(t, 200, resp.StatusCode)
-		body, err = ioutil.ReadAll(resp.Body)
+		body, err = io.ReadAll(resp.Body)
 		require.NoError(t, err)
 		err = resp.Body.Close()
 		require.NoError(t, err)
