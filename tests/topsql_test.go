@@ -114,7 +114,7 @@ func (s *testTopSQLSuite) SetupSuite() {
 	s.topCh = make(topology.Subscriber)
 	s.varCh = make(pdvariable.Subscriber)
 	s.cfgCh = make(config.Subscriber)
-	err = topsql.Init(s.cfgCh, s.docDB, timeseries.InsertHandler, timeseries.SelectHandler, s.topCh, s.varCh, 0)
+	err = topsql.Init(nil, s.cfgCh, s.docDB, timeseries.InsertHandler, timeseries.SelectHandler, s.topCh, s.varCh, 0)
 	s.NoError(err)
 	s.varCh <- enable
 	time.Sleep(100 * time.Millisecond)

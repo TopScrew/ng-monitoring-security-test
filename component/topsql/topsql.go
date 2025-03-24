@@ -3,6 +3,7 @@ package topsql
 import (
 	"net/http"
 
+	"github.com/pingcap/ng-monitoring/component/domain"
 	"github.com/pingcap/ng-monitoring/component/subscriber"
 	"github.com/pingcap/ng-monitoring/component/topology"
 	"github.com/pingcap/ng-monitoring/component/topsql/query"
@@ -24,6 +25,7 @@ var (
 )
 
 func Init(
+	do *domain.Domain,
 	cfgSub config.Subscriber,
 	docDB docdb.DocDB,
 	insertHdr, selectHdr http.HandlerFunc,
@@ -33,7 +35,7 @@ func Init(
 ) (err error) {
 	defStore = store.NewDefaultStore(insertHdr, docDB, metaRetentionSecs)
 	defQuery = query.NewDefaultQuery(selectHdr, docDB)
-	defSubscriber = sub.NewSubscriber(topSub, varSub, cfgSub, defStore)
+	defSubscriber = sub.NewSubscriber(topSub, varSub, cfgSub, do, defStore)
 	defService = service.NewService(defQuery)
 	return nil
 }
