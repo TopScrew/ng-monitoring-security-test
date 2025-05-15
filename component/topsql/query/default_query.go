@@ -2,7 +2,6 @@ package query
 
 import (
 	"container/heap"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,9 +11,10 @@ import (
 
 	"github.com/pingcap/ng-monitoring/component/topsql/codec/plan"
 	"github.com/pingcap/ng-monitoring/component/topsql/store"
-	"github.com/pingcap/ng-monitoring/database/docdb"
 	"github.com/pingcap/ng-monitoring/utils"
 
+	"github.com/genjidb/genji"
+	"github.com/genjidb/genji/document"
 	"github.com/pingcap/log"
 	"github.com/wangjohn/quickselect"
 	"go.uber.org/zap"
@@ -40,13 +40,13 @@ const (
 
 type DefaultQuery struct {
 	vmselectHandler http.HandlerFunc
-	docDB           docdb.DocDB
+	documentDB      *genji.DB
 }
 
-func NewDefaultQuery(vmselectHandler http.HandlerFunc, docDB docdb.DocDB) *DefaultQuery {
+func NewDefaultQuery(vmselectHandler http.HandlerFunc, documentDB *genji.DB) *DefaultQuery {
 	return &DefaultQuery{
 		vmselectHandler: vmselectHandler,
-		docDB:           docDB,
+		documentDB:      documentDB,
 	}
 }
 
@@ -658,77 +658,83 @@ func mergeOthers(originalOthers sqlGroup, queryOthers []sqlGroup) (res sqlGroup)
 }
 
 func (dq *DefaultQuery) fillText(name string, sqlGroups *[]sqlGroup, fill func(RecordItem)) error {
-	var err error
-	ctx := context.Background()
-	for _, group := range *sqlGroups {
-		sqlDigest := group.sqlDigest
-		var sqlText string
+	return dq.documentDB.View(func(tx *genji.Tx) error {
+		for _, group := range *sqlGroups {
+			sqlDigest := group.sqlDigest
+			var sqlText string
 
-		if len(sqlDigest) != 0 {
-			sqlText, err = dq.docDB.QuerySQLMeta(ctx, sqlDigest)
-			if err != nil {
-				return err
-			}
-		}
-
-		item := RecordItem{
-			SQLDigest: sqlDigest,
-			SQLText:   sqlText,
-			IsOther:   len(sqlDigest) == 0,
-		}
-
-		for _, series := range group.planSeries {
-			planDigest := series.planDigest
-			var planText string
-			var encodedPlan string
-
-			if len(planDigest) != 0 {
-				planText, encodedPlan, err = dq.docDB.QueryPlanMeta(ctx, planDigest)
-				if err != nil {
-					return err
+			if len(sqlDigest) != 0 {
+				r, err := tx.QueryDocument(
+					"SELECT sql_text FROM sql_digest WHERE digest = ?",
+					sqlDigest,
+				)
+				if err == nil {
+					_ = document.Scan(r, &sqlText)
 				}
 			}
 
-			planItem := RecordPlanItem{
-				PlanDigest:   planDigest,
-				TimestampSec: series.timestampSecs,
+			item := RecordItem{
+				SQLDigest: sqlDigest,
+				SQLText:   sqlText,
+				IsOther:   len(sqlDigest) == 0,
 			}
 
-			if len(planText) > 0 {
-				planItem.PlanText = planText
-			} else if len(encodedPlan) > 0 {
-				var err error
-				planItem.PlanText, err = plan.Decode(encodedPlan)
-				if err != nil {
-					log.Warn("failed to decode plan", zap.Error(err), zap.String("encoded plan", encodedPlan))
+			for _, series := range group.planSeries {
+				planDigest := series.planDigest
+				var planText string
+				var encodedPlan string
+
+				if len(planDigest) != 0 {
+					r, err := tx.QueryDocument(
+						"SELECT plan_text, encoded_plan FROM plan_digest WHERE digest = ?",
+						planDigest,
+					)
+					if err == nil {
+						_ = document.Scan(r, &planText, &encodedPlan)
+					}
 				}
+
+				planItem := RecordPlanItem{
+					PlanDigest:   planDigest,
+					TimestampSec: series.timestampSecs,
+				}
+
+				if len(planText) > 0 {
+					planItem.PlanText = planText
+				} else if len(encodedPlan) > 0 {
+					var err error
+					planItem.PlanText, err = plan.Decode(encodedPlan)
+					if err != nil {
+						log.Warn("failed to decode plan", zap.Error(err), zap.String("encoded plan", encodedPlan))
+					}
+				}
+
+				switch name {
+				case store.MetricNameCPUTime:
+					planItem.CPUTimeMs = series.values
+				case store.MetricNameReadRow:
+					planItem.ReadRows = series.values
+				case store.MetricNameReadIndex:
+					planItem.ReadIndexes = series.values
+				case store.MetricNameWriteRow:
+					planItem.WriteRows = series.values
+				case store.MetricNameWriteIndex:
+					planItem.WriteIndexes = series.values
+				case store.MetricNameSQLExecCount:
+					planItem.SQLExecCount = series.values
+				case store.MetricNameSQLDurationSum:
+					planItem.SQLDurationSum = series.values
+				case store.MetricNameSQLDurationCount:
+					planItem.SQLDurationCount = series.values
+				}
+				item.Plans = append(item.Plans, planItem)
 			}
 
-			switch name {
-			case store.MetricNameCPUTime:
-				planItem.CPUTimeMs = series.values
-			case store.MetricNameReadRow:
-				planItem.ReadRows = series.values
-			case store.MetricNameReadIndex:
-				planItem.ReadIndexes = series.values
-			case store.MetricNameWriteRow:
-				planItem.WriteRows = series.values
-			case store.MetricNameWriteIndex:
-				planItem.WriteIndexes = series.values
-			case store.MetricNameSQLExecCount:
-				planItem.SQLExecCount = series.values
-			case store.MetricNameSQLDurationSum:
-				planItem.SQLDurationSum = series.values
-			case store.MetricNameSQLDurationCount:
-				planItem.SQLDurationCount = series.values
-			}
-			item.Plans = append(item.Plans, planItem)
+			fill(item)
 		}
 
-		fill(item)
-	}
-
-	return nil
+		return nil
+	})
 }
 
 type TopKSlice []sqlGroup

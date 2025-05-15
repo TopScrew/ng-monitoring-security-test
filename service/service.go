@@ -4,7 +4,6 @@ import (
 	"net"
 
 	"github.com/pingcap/ng-monitoring/config"
-	"github.com/pingcap/ng-monitoring/database/docdb"
 	"github.com/pingcap/ng-monitoring/service/http"
 	"github.com/pingcap/ng-monitoring/utils"
 
@@ -12,7 +11,7 @@ import (
 	"go.uber.org/zap"
 )
 
-func Init(cfg *config.Config, docDB docdb.DocDB) {
+func Init(cfg *config.Config) {
 	listener, err := net.Listen("tcp", cfg.Address)
 	if err != nil {
 		log.Fatal("failed to listen",
@@ -22,7 +21,7 @@ func Init(cfg *config.Config, docDB docdb.DocDB) {
 	}
 
 	go utils.GoWithRecovery(func() {
-		http.ServeHTTP(&cfg.Log, listener, docDB)
+		http.ServeHTTP(&cfg.Log, listener)
 	}, nil)
 
 	log.Info(

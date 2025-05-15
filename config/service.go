@@ -6,42 +6,36 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/pingcap/ng-monitoring/database/docdb"
-
 	"github.com/gin-gonic/gin"
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
 )
 
-func HTTPService(g *gin.RouterGroup, docDB docdb.DocDB) {
-	g.GET("", handleGetConfig(docDB))
-	g.POST("", handlePostConfig(docDB))
+func HTTPService(g *gin.RouterGroup) {
+	g.GET("", handleGetConfig)
+	g.POST("", handlePostConfig)
 }
 
-func handleGetConfig(docDB docdb.DocDB) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		cfg := GetGlobalConfig()
-		c.JSON(http.StatusOK, cfg)
-	}
+func handleGetConfig(c *gin.Context) {
+	cfg := GetGlobalConfig()
+	c.JSON(http.StatusOK, cfg)
 }
 
-func handlePostConfig(docDB docdb.DocDB) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		err := handleModifyConfig(c, docDB)
-		if err != nil {
-			c.JSON(http.StatusServiceUnavailable, gin.H{
-				"status":  "error",
-				"message": err.Error(),
-			})
-			return
-		}
-		c.JSON(http.StatusOK, gin.H{
-			"status": "ok",
+func handlePostConfig(c *gin.Context) {
+	err := handleModifyConfig(c)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"status":  "error",
+			"message": err.Error(),
 		})
+		return
 	}
+	c.JSON(http.StatusOK, gin.H{
+		"status": "ok",
+	})
 }
 
-func handleModifyConfig(c *gin.Context, docDB docdb.DocDB) error {
+func handleModifyConfig(c *gin.Context) error {
 	var reqNested map[string]interface{}
 	if err := json.NewDecoder(c.Request.Body).Decode(&reqNested); err != nil {
 		return err
@@ -53,7 +47,7 @@ func handleModifyConfig(c *gin.Context, docDB docdb.DocDB) error {
 			if !ok {
 				return fmt.Errorf("%v config value is invalid: %v", k, v)
 			}
-			err := handleContinueProfilingConfigModify(m, docDB)
+			err := handleContinueProfilingConfigModify(m)
 			if err != nil {
 				return err
 			}
@@ -64,7 +58,7 @@ func handleModifyConfig(c *gin.Context, docDB docdb.DocDB) error {
 	return nil
 }
 
-func handleContinueProfilingConfigModify(reqNested map[string]interface{}, docDB docdb.DocDB) (err error) {
+func handleContinueProfilingConfigModify(reqNested map[string]interface{}) (err error) {
 	UpdateGlobalConfig(func(curCfg Config) (res Config) {
 		res = curCfg
 		var current []byte
@@ -117,5 +111,5 @@ func handleContinueProfilingConfigModify(reqNested map[string]interface{}, docDB
 		return err
 	}
 
-	return saveConfigIntoStorage(docDB)
+	return saveConfigIntoStorage()
 }

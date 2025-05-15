@@ -4,34 +4,39 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
 	"testing"
 	"time"
 
-	"github.com/VictoriaMetrics/VictoriaMetrics/lib/procutil"
-	"github.com/gin-gonic/gin"
-	"github.com/pingcap/ng-monitoring/database/docdb"
 	"github.com/pingcap/ng-monitoring/utils/testutil"
+
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/procutil"
+	"github.com/genjidb/genji"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
 type testSuite struct {
 	tmpDir string
-	db     docdb.DocDB
+	db     *genji.DB
 }
 
 func (ts *testSuite) setup(t *testing.T) {
 	var err error
-	ts.tmpDir, err = os.MkdirTemp(os.TempDir(), "ngm-test-.*")
+	ts.tmpDir, err = ioutil.TempDir(os.TempDir(), "ngm-test-.*")
 	require.NoError(t, err)
-	ts.db, err = docdb.NewGenjiDBFromGenji(testutil.NewGenjiDB(t, ts.tmpDir))
-	require.NoError(t, err)
+	ts.db = testutil.NewGenjiDB(t, ts.tmpDir)
+	GetDB = func() *genji.DB {
+		return ts.db
+	}
 	def := GetDefaultConfig()
 	StoreGlobalConfig(def)
-	err = LoadConfigFromStorage(context.Background(), ts.db)
+	err = LoadConfigFromStorage(func() *genji.DB {
+		return ts.db
+	})
 	require.NoError(t, err)
 }
 
@@ -46,10 +51,10 @@ func TestHTTPService(t *testing.T) {
 	ts := testSuite{}
 	ts.setup(t)
 	defer ts.close(t)
-	addr := setupHTTPService(t, ts.db)
+	addr := setupHTTPService(t)
 	resp, err := http.Get("http://" + addr + "/config")
 	require.NoError(t, err)
-	data, err := io.ReadAll(resp.Body)
+	data, err := ioutil.ReadAll(resp.Body)
 	require.NoError(t, err)
 	err = resp.Body.Close()
 	require.NoError(t, err)
@@ -72,7 +77,7 @@ func TestHTTPService(t *testing.T) {
 	res, err = http.Post("http://"+addr+"/config", "application/json", bytes.NewReader([]byte(`{"continuous_profiling": {"enable": true,"profile_seconds":1000,"interval_seconds":11}}`)))
 	require.NoError(t, err)
 	require.Equal(t, 503, res.StatusCode)
-	body, err := io.ReadAll(res.Body)
+	body, err := ioutil.ReadAll(res.Body)
 	require.NoError(t, err)
 	require.Equal(t, `{"message":"new config is invalid: {\"data_retention_seconds\":259200,\"enable\":true,\"interval_seconds\":11,\"profile_seconds\":1000,\"timeout_seconds\":120}","status":"error"}`, string(body))
 	err = res.Body.Close()
@@ -82,7 +87,7 @@ func TestHTTPService(t *testing.T) {
 	res, err = http.Post("http://"+addr+"/config", "application/json", bytes.NewReader([]byte(``)))
 	require.NoError(t, err)
 	require.Equal(t, 503, res.StatusCode)
-	body, err = io.ReadAll(res.Body)
+	body, err = ioutil.ReadAll(res.Body)
 	require.NoError(t, err)
 	require.Equal(t, `{"message":"EOF","status":"error"}`, string(body))
 	err = res.Body.Close()
@@ -92,7 +97,7 @@ func TestHTTPService(t *testing.T) {
 	res, err = http.Post("http://"+addr+"/config", "application/json", bytes.NewReader([]byte(`{"unknown_module": {"enable": true}}`)))
 	require.NoError(t, err)
 	require.Equal(t, 503, res.StatusCode)
-	body, err = io.ReadAll(res.Body)
+	body, err = ioutil.ReadAll(res.Body)
 	require.NoError(t, err)
 	require.Equal(t, `{"message":"config unknown_module not support modify or unknow","status":"error"}`, string(body))
 	err = res.Body.Close()
@@ -108,10 +113,10 @@ func TestCombineHTTPWithFile(t *testing.T) {
 	ts := testSuite{}
 	ts.setup(t)
 	defer ts.close(t)
-	addr := setupHTTPService(t, ts.db)
+	addr := setupHTTPService(t)
 
 	cfgFileName := "test-cfg.toml"
-	err := os.WriteFile(cfgFileName, []byte(""), 0666)
+	err := ioutil.WriteFile(cfgFileName, []byte(""), 0666)
 	require.NoError(t, err)
 	defer os.Remove(cfgFileName)
 
@@ -127,7 +132,7 @@ func TestCombineHTTPWithFile(t *testing.T) {
 	cfg := GetGlobalConfig()
 	require.Equal(t, cfg.ContinueProfiling.Enable, true)
 
-	err = os.WriteFile(cfgFileName, []byte("[pd]\nendpoints = [\"10.0.1.8:2379\"]"), 0666)
+	err = ioutil.WriteFile(cfgFileName, []byte("[pd]\nendpoints = [\"10.0.1.8:2379\"]"), 0666)
 	require.NoError(t, err)
 	procutil.SelfSIGHUP()
 
@@ -145,7 +150,7 @@ func TestCombineHTTPWithFile(t *testing.T) {
 	require.Equal(t, cfg.ContinueProfiling.Enable, false)
 	require.Equal(t, cfg.PD.Endpoints, []string{"10.0.1.8:2379"})
 
-	err = os.WriteFile(cfgFileName, []byte("[pd]\nendpoints = [\"10.0.1.8:2479\"]"), 0666)
+	err = ioutil.WriteFile(cfgFileName, []byte("[pd]\nendpoints = [\"10.0.1.8:2479\"]"), 0666)
 	require.NoError(t, err)
 	procutil.SelfSIGHUP()
 
@@ -155,7 +160,7 @@ func TestCombineHTTPWithFile(t *testing.T) {
 	require.Equal(t, cfg.PD.Endpoints, []string{"10.0.1.8:2479"})
 }
 
-func setupHTTPService(t *testing.T, docDB docdb.DocDB) string {
+func setupHTTPService(t *testing.T) string {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 
@@ -164,7 +169,7 @@ func setupHTTPService(t *testing.T, docDB docdb.DocDB) string {
 
 	ng.Use(gin.Recovery())
 	configGroup := ng.Group("/config")
-	HTTPService(configGroup, docDB)
+	HTTPService(configGroup)
 	httpServer := &http.Server{Handler: ng}
 
 	go func() {

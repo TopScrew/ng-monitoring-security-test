@@ -2,20 +2,18 @@ package store
 
 import (
 	"bytes"
-	"context"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/pingcap/ng-monitoring/component/subscriber/model"
 	"github.com/pingcap/ng-monitoring/component/topology"
 	"github.com/pingcap/ng-monitoring/component/topsql/codec/resource_group_tag"
-	"github.com/pingcap/ng-monitoring/database/docdb"
 	"github.com/pingcap/ng-monitoring/utils"
 
+	"github.com/genjidb/genji"
 	rsmetering "github.com/pingcap/kvproto/pkg/resource_usage_agent"
 	"github.com/pingcap/log"
 	"github.com/pingcap/tipb/go-tipb"
@@ -28,23 +26,37 @@ var (
 )
 
 type DefaultStore struct {
-	vminsertHandler   http.HandlerFunc
-	docDB             docdb.DocDB
-	metaRetentionSecs int64
-	closeCh           chan struct{}
+	vminsertHandler http.HandlerFunc
+	documentDB      *genji.DB
 }
 
-func NewDefaultStore(vminsertHandler http.HandlerFunc, docDB docdb.DocDB, metaRetentionSecs int64) *DefaultStore {
+func NewDefaultStore(vminsertHandler http.HandlerFunc, documentDB *genji.DB) (*DefaultStore, error) {
 	ds := &DefaultStore{
-		vminsertHandler:   vminsertHandler,
-		docDB:             docDB,
-		metaRetentionSecs: metaRetentionSecs,
-		closeCh:           make(chan struct{}),
+		vminsertHandler: vminsertHandler,
+		documentDB:      documentDB,
 	}
-	if metaRetentionSecs > 0 {
-		go ds.gcLoop()
+	if err := ds.initDocumentDB(); err != nil {
+		return nil, err
 	}
-	return ds
+	return &DefaultStore{
+		vminsertHandler: vminsertHandler,
+		documentDB:      documentDB,
+	}, nil
+}
+
+func (ds *DefaultStore) initDocumentDB() error {
+	createTableStmts := []string{
+		"CREATE TABLE IF NOT EXISTS sql_digest (digest VARCHAR(255) PRIMARY KEY)",
+		"CREATE TABLE IF NOT EXISTS plan_digest (digest VARCHAR(255) PRIMARY KEY)",
+	}
+
+	for _, stmt := range createTableStmts {
+		if err := ds.documentDB.Exec(stmt); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 var _ Store = &DefaultStore{}
@@ -72,36 +84,26 @@ func (ds *DefaultStore) ResourceMeteringRecord(
 }
 
 func (ds *DefaultStore) SQLMeta(meta *tipb.SQLMeta) error {
-	return ds.docDB.WriteSQLMeta(context.Background(), meta)
+	prepareStmt := "INSERT INTO sql_digest(digest, sql_text, is_internal) VALUES (?, ?, ?) ON CONFLICT DO REPLACE"
+	prepare, err := ds.documentDB.Prepare(prepareStmt)
+	if err != nil {
+		return err
+	}
+
+	return prepare.Exec(hex.EncodeToString(meta.SqlDigest), meta.NormalizedSql, meta.IsInternalSql)
 }
 
 func (ds *DefaultStore) PlanMeta(meta *tipb.PlanMeta) error {
-	return ds.docDB.WritePlanMeta(context.Background(), meta)
-}
-
-func (ds *DefaultStore) Close() {
-	close(ds.closeCh)
-}
-
-func (ds *DefaultStore) gcLoop() {
-	t := time.NewTicker(time.Hour)
-	defer t.Stop()
-	for {
-		select {
-		case <-ds.closeCh:
-			return
-		case <-t.C:
-			now := time.Now().Unix()
-			safePointTs := now - ds.metaRetentionSecs
-			if err := ds.docDB.DeleteSQLMetaBeforeTs(context.Background(), safePointTs); err != nil {
-				log.Warn("failed to delete sql meta before ts", zap.Error(err), zap.Int64("ts", safePointTs))
-			}
-			if err := ds.docDB.DeletePlanMetaBeforeTs(context.Background(), safePointTs); err != nil {
-				log.Warn("failed to delete plan meta before ts", zap.Error(err), zap.Int64("ts", safePointTs))
-			}
-		}
+	prepareStmt := "INSERT INTO plan_digest(digest, plan_text, encoded_plan) VALUES (?, ?, ?) ON CONFLICT DO REPLACE"
+	prepare, err := ds.documentDB.Prepare(prepareStmt)
+	if err != nil {
+		return err
 	}
+
+	return prepare.Exec(hex.EncodeToString(meta.PlanDigest), meta.NormalizedPlan, meta.EncodedNormalizedPlan)
 }
+
+func (ds *DefaultStore) Close() {}
 
 // transform InstanceItem to Metric
 func instancesItemToMetric(items []InstanceItem) (res []Metric) {

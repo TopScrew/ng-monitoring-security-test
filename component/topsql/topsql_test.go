@@ -2,6 +2,7 @@ package topsql_test
 
 import (
 	"encoding/hex"
+	"io/ioutil"
 	"os"
 	"sort"
 	"strconv"
@@ -13,9 +14,8 @@ import (
 	"github.com/pingcap/ng-monitoring/component/topsql/store"
 	"github.com/pingcap/ng-monitoring/config"
 	"github.com/pingcap/ng-monitoring/database"
-	"github.com/pingcap/ng-monitoring/database/docdb"
+	"github.com/pingcap/ng-monitoring/database/document"
 	"github.com/pingcap/ng-monitoring/database/timeseries"
-	"github.com/pingcap/ng-monitoring/utils/testutil"
 
 	"github.com/VictoriaMetrics/VictoriaMetrics/app/vmstorage"
 	rsmetering "github.com/pingcap/kvproto/pkg/resource_usage_agent"
@@ -33,15 +33,14 @@ var testBaseTs = now - (now % 10000)
 type testTopSQLSuite struct {
 	suite.Suite
 
-	dq    *query.DefaultQuery
-	ds    *store.DefaultStore
-	docDB docdb.DocDB
+	dq *query.DefaultQuery
+	ds *store.DefaultStore
 
 	dir string
 }
 
 func (s *testTopSQLSuite) SetupSuite() {
-	dir, err := os.MkdirTemp("", "topsql-test")
+	dir, err := ioutil.TempDir("", "topsql-test")
 	s.NoError(err)
 
 	s.dir = dir
@@ -49,17 +48,19 @@ func (s *testTopSQLSuite) SetupSuite() {
 	cfg.Storage.Path = dir
 
 	database.Init(&cfg)
-	s.docDB, err = docdb.NewGenjiDBFromGenji(testutil.NewGenjiDB(s.T(), dir))
+
+	ds, err := store.NewDefaultStore(timeseries.InsertHandler, document.Get())
 	s.NoError(err)
-	s.ds = store.NewDefaultStore(timeseries.InsertHandler, s.docDB, 0)
-	s.dq = query.NewDefaultQuery(timeseries.SelectHandler, s.docDB)
+	s.ds = ds
+
+	dq := query.NewDefaultQuery(timeseries.SelectHandler, document.Get())
+	s.dq = dq
 }
 
 func (s *testTopSQLSuite) TearDownSuite() {
 	s.ds.Close()
 	s.dq.Close()
 	database.Stop()
-	s.docDB.Close()
 	s.NoError(os.RemoveAll(s.dir))
 }
 
