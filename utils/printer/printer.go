@@ -7,7 +7,8 @@ import (
 	"github.com/pingcap/log"
 	"go.uber.org/zap"
 
-	_ "unsafe" // required by go:linkname
+	_ "runtime" // import link package
+	_ "unsafe"  // required by go:linkname
 )
 
 // Version information.
